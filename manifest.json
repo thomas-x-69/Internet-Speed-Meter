@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "Internet Speed Meter",
+  "version": "1.0.0",
+  "description": "Monitor real-time internet usage across browser tabs",
+
+  "permissions": ["webRequest", "storage", "tabs", "webNavigation"],
+
+  "background": {
+    "service_worker": "src/background/index.ts",
+    "type": "module"
+  },
+
+  "action": {
+    "default_popup": "index.html",
+    "default_icon": {}
+  },
+
+  "icons": {}
+}
