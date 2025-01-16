@@ -17,10 +17,73 @@ interface TabTraffic {
   };
 }
 
+interface DailyTraffic {
+  date: string;
+  totalBytes: number;
+}
+
 // Store traffic data for each tab
 const tabTraffic: TabTraffic = {};
 
-// Utility function to convert bytes to human readable format
+// Get today's date as YYYY-MM-DD
+function getTodayDate(): string {
+  return new Date().toISOString().split("T")[0];
+}
+
+// Promisified storage get
+function getStorageData(key: string): Promise<any> {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(key, (result) => {
+      resolve(result[key]);
+    });
+  });
+}
+
+// Promisified storage set
+function setStorageData(key: string, value: any): Promise<void> {
+  return new Promise((resolve) => {
+    chrome.storage.local.set({ [key]: value }, () => {
+      resolve();
+    });
+  });
+}
+
+// Initialize or get daily total
+async function initializeDailyTotal(): Promise<DailyTraffic> {
+  try {
+    const today = getTodayDate();
+    const dailyTraffic = (await getStorageData("dailyTraffic")) as DailyTraffic;
+
+    if (!dailyTraffic || dailyTraffic.date !== today) {
+      const newDailyTraffic = { date: today, totalBytes: 0 };
+      await setStorageData("dailyTraffic", newDailyTraffic);
+      return newDailyTraffic;
+    }
+
+    return dailyTraffic;
+  } catch (error) {
+    console.error("Error initializing daily total:", error);
+    return { date: getTodayDate(), totalBytes: 0 };
+  }
+}
+
+// Update daily total
+async function updateDailyTotal(additionalBytes: number): Promise<void> {
+  try {
+    const dailyTraffic = await initializeDailyTotal();
+    dailyTraffic.totalBytes += additionalBytes;
+    await setStorageData("dailyTraffic", dailyTraffic);
+  } catch (error) {
+    console.error("Error updating daily total:", error);
+  }
+}
+
+// Initialize extension data
+chrome.runtime.onInstalled.addListener(() => {
+  initializeDailyTotal().catch(console.error);
+});
+
+// Utility functions remain the same
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
   const sizes = ["B", "KB", "MB", "GB"];
@@ -28,10 +91,9 @@ function formatBytes(bytes: number): string {
   return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${sizes[i]}`;
 }
 
-// Calculate badge color based on speed
 function getColorForSpeed(bytesPerSecond: number): [number, number, number] {
-  const LOW_THRESHOLD = 50 * 1024; // 50KB/s
-  const HIGH_THRESHOLD = 1024 * 1024; // 1MB/s
+  const LOW_THRESHOLD = 50 * 1024;
+  const HIGH_THRESHOLD = 1024 * 1024;
 
   if (bytesPerSecond <= LOW_THRESHOLD) {
     const ratio = bytesPerSecond / LOW_THRESHOLD;
@@ -44,7 +106,7 @@ function getColorForSpeed(bytesPerSecond: number): [number, number, number] {
   return [255, 0, 0];
 }
 
-// Update tab information
+// Handle tab management
 async function updateTabInfo(tabId: number) {
   try {
     const tab = await chrome.tabs.get(tabId);
@@ -57,7 +119,6 @@ async function updateTabInfo(tabId: number) {
   }
 }
 
-// Initialize tab monitoring
 chrome.tabs.onCreated.addListener(async (tab) => {
   if (tab.id) {
     tabTraffic[tab.id] = {
@@ -71,41 +132,47 @@ chrome.tabs.onCreated.addListener(async (tab) => {
   }
 });
 
-// Update tab information when URL changes
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.url || changeInfo.title) {
     updateTabInfo(tabId);
   }
 });
 
-// Clean up when tab is closed
 chrome.tabs.onRemoved.addListener((tabId) => {
   delete tabTraffic[tabId];
 });
 
 // Handle messages from popup
-chrome.runtime.onMessage.addListener((request, __sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   if (request.type === "GET_TAB_TRAFFIC") {
-    const sortedTabs = Object.entries(tabTraffic)
-      .map(([tabId, data]) => ({
-        tabId: parseInt(tabId),
-        ...data,
-      }))
-      .sort((a, b) => b.totalBytes - a.totalBytes);
+    getStorageData("dailyTraffic").then((dailyTraffic: DailyTraffic) => {
+      const currentDailyTraffic = dailyTraffic || {
+        date: getTodayDate(),
+        totalBytes: 0,
+      };
+      const sortedTabs = Object.entries(tabTraffic)
+        .map(([tabId, data]) => ({
+          tabId: parseInt(tabId),
+          ...data,
+        }))
+        .sort((a, b) => b.totalBytes - a.totalBytes);
 
-    sendResponse(sortedTabs);
+      sendResponse({
+        tabs: sortedTabs,
+        dailyTotal: currentDailyTraffic.totalBytes,
+      });
+    });
+    return true; // Required to use sendResponse asynchronously
   }
-  return true;
 });
 
 // Monitor network requests
 chrome.webRequest.onCompleted.addListener(
-  (details) => {
+  async (details) => {
     const { tabId, timeStamp } = details;
 
-    if (tabId === -1) return; // Ignore non-tab requests
+    if (tabId === -1) return;
 
-    // Initialize tab data if not exists
     if (!tabTraffic[tabId]) {
       tabTraffic[tabId] = {
         url: "",
@@ -115,10 +182,9 @@ chrome.webRequest.onCompleted.addListener(
         lastUpdate: timeStamp,
         trafficData: [],
       };
-      updateTabInfo(tabId);
+      await updateTabInfo(tabId);
     }
 
-    // Calculate received bytes
     const contentLengthHeader = details.responseHeaders?.find(
       (h) => h.name.toLowerCase() === "content-length"
     );
@@ -126,7 +192,8 @@ chrome.webRequest.onCompleted.addListener(
       ? parseInt(contentLengthHeader.value, 10)
       : 0;
 
-    // Add traffic data
+    await updateDailyTotal(bytesReceived);
+
     tabTraffic[tabId].trafficData.push({
       bytesReceived,
       bytesSent: 0,
@@ -134,7 +201,6 @@ chrome.webRequest.onCompleted.addListener(
       tabId,
     });
 
-    // Update total bytes and calculate current speed
     tabTraffic[tabId].totalBytes += bytesReceived;
 
     const oneSecondAgo = timeStamp - 1000;
@@ -144,7 +210,6 @@ chrome.webRequest.onCompleted.addListener(
 
     tabTraffic[tabId].currentSpeed = recentTraffic;
 
-    // Update badge for current tab
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (tabs[0]?.id === tabId) {
         const formattedSpeed = formatBytes(recentTraffic) + "/s";
@@ -157,7 +222,6 @@ chrome.webRequest.onCompleted.addListener(
       }
     });
 
-    // Clean old data (keep last minute)
     tabTraffic[tabId].trafficData = tabTraffic[tabId].trafficData.filter(
       (t) => t.timestamp > timeStamp - 60000
     );

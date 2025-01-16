@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "description": "Monitor real-time internet usage across browser tabs",
 
-  "permissions": ["webRequest", "tabs", "webNavigation"],
+  "permissions": ["webRequest", "storage", "tabs", "webNavigation"],
 
   "host_permissions": ["<all_urls>"],
 
