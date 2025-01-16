@@ -1,4 +1,4 @@
-// Types for our traffic monitoring
+// Internal types for traffic monitoring
 interface TrafficData {
   bytesReceived: number;
   bytesSent: number;
@@ -8,7 +8,10 @@ interface TrafficData {
 
 interface TabTraffic {
   [tabId: number]: {
+    url: string;
+    title: string;
     currentSpeed: number; // bytes per second
+    totalBytes: number; // total bytes transferred
     lastUpdate: number; // timestamp
     trafficData: TrafficData[];
   };
@@ -17,7 +20,7 @@ interface TabTraffic {
 // Store traffic data for each tab
 const tabTraffic: TabTraffic = {};
 
-// Convert bytes to human readable format
+// Utility function to convert bytes to human readable format
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
   const sizes = ["B", "KB", "MB", "GB"];
@@ -25,40 +28,74 @@ function formatBytes(bytes: number): string {
   return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${sizes[i]}`;
 }
 
-// Calculate color based on speed (bytes per second)
+// Calculate badge color based on speed
 function getColorForSpeed(bytesPerSecond: number): [number, number, number] {
-  // Define thresholds in bytes per second
   const LOW_THRESHOLD = 50 * 1024; // 50KB/s
   const HIGH_THRESHOLD = 1024 * 1024; // 1MB/s
 
   if (bytesPerSecond <= LOW_THRESHOLD) {
-    // Green to Yellow
     const ratio = bytesPerSecond / LOW_THRESHOLD;
     return [Math.floor(255 * ratio), 255, 0];
   } else if (bytesPerSecond <= HIGH_THRESHOLD) {
-    // Yellow to Red
     const ratio =
       (bytesPerSecond - LOW_THRESHOLD) / (HIGH_THRESHOLD - LOW_THRESHOLD);
     return [255, Math.floor(255 * (1 - ratio)), 0];
   }
-  // Red for high speeds
   return [255, 0, 0];
 }
 
+// Update tab information
+async function updateTabInfo(tabId: number) {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (tabTraffic[tabId]) {
+      tabTraffic[tabId].url = tab.url || "";
+      tabTraffic[tabId].title = tab.title || "";
+    }
+  } catch (error) {
+    console.error("Error updating tab info:", error);
+  }
+}
+
 // Initialize tab monitoring
-chrome.tabs.onCreated.addListener((tab) => {
+chrome.tabs.onCreated.addListener(async (tab) => {
   if (tab.id) {
     tabTraffic[tab.id] = {
+      url: tab.url || "",
+      title: tab.title || "",
       currentSpeed: 0,
+      totalBytes: 0,
       lastUpdate: Date.now(),
       trafficData: [],
     };
   }
 });
 
+// Update tab information when URL changes
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.url || changeInfo.title) {
+    updateTabInfo(tabId);
+  }
+});
+
 // Clean up when tab is closed
 chrome.tabs.onRemoved.addListener((tabId) => {
   delete tabTraffic[tabId];
+});
+
+// Handle messages from popup
+chrome.runtime.onMessage.addListener((request, __sender, sendResponse) => {
+  if (request.type === "GET_TAB_TRAFFIC") {
+    const sortedTabs = Object.entries(tabTraffic)
+      .map(([tabId, data]) => ({
+        tabId: parseInt(tabId),
+        ...data,
+      }))
+      .sort((a, b) => b.totalBytes - a.totalBytes);
+
+    sendResponse(sortedTabs);
+  }
+  return true;
 });
 
 // Monitor network requests
@@ -71,10 +108,14 @@ chrome.webRequest.onCompleted.addListener(
     // Initialize tab data if not exists
     if (!tabTraffic[tabId]) {
       tabTraffic[tabId] = {
+        url: "",
+        title: "",
         currentSpeed: 0,
+        totalBytes: 0,
         lastUpdate: timeStamp,
         trafficData: [],
       };
+      updateTabInfo(tabId);
     }
 
     // Calculate received bytes
@@ -88,15 +129,15 @@ chrome.webRequest.onCompleted.addListener(
     // Add traffic data
     tabTraffic[tabId].trafficData.push({
       bytesReceived,
-      bytesSent: 0, // We'll implement this later
+      bytesSent: 0,
       timestamp: timeStamp,
       tabId,
     });
 
-    // Calculate current speed (last second)
-    const now = timeStamp;
-    const oneSecondAgo = now - 1000;
+    // Update total bytes and calculate current speed
+    tabTraffic[tabId].totalBytes += bytesReceived;
 
+    const oneSecondAgo = timeStamp - 1000;
     const recentTraffic = tabTraffic[tabId].trafficData
       .filter((t) => t.timestamp > oneSecondAgo)
       .reduce((sum, t) => sum + t.bytesReceived + t.bytesSent, 0);
